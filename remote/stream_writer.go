@@ -7,11 +7,12 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"sync"
 	"time"
 
 	"github.com/anthdm/hollywood/actor"
 	"storj.io/drpc/drpcconn"
+	"storj.io/drpc/drpcmanager"
+	"storj.io/drpc/drpcwire"
 )
 
 const (
@@ -30,9 +31,10 @@ type streamWriter struct {
 	inbox       actor.Inboxer
 	serializer  Serializer
 	tlsConfig   *tls.Config
+	buffSize    int
 }
 
-func newStreamWriter(e *actor.Engine, rpid *actor.PID, address string, tlsConfig *tls.Config) actor.Processer {
+func newStreamWriter(e *actor.Engine, rpid *actor.PID, address string, tlsConfig *tls.Config, buffSize int) actor.Processer {
 	return &streamWriter{
 		writeToAddr: address,
 		engine:      e,
@@ -41,6 +43,7 @@ func newStreamWriter(e *actor.Engine, rpid *actor.PID, address string, tlsConfig
 		pid:         actor.NewPID(e.Address(), "stream"+"/"+address),
 		serializer:  ProtoSerializer{},
 		tlsConfig:   tlsConfig,
+		buffSize:    buffSize,
 	}
 }
 
@@ -117,7 +120,6 @@ func (s *streamWriter) init() {
 	)
 	for i := 0; i < maxRetries; i++ {
 		// Here we try to connect to the remote address.
-		// Todo: can we make an Event here in case of failure?
 		switch s.tlsConfig {
 		case nil:
 			rawconn, err = net.Dial("tcp", s.writeToAddr)
@@ -142,11 +144,7 @@ func (s *streamWriter) init() {
 	// We could not reach the remote after retrying N times. Hence, shutdown the stream writer.
 	// and notify RemoteUnreachableEvent.
 	if rawconn == nil {
-		evt := actor.RemoteUnreachableEvent{
-			ListenAddr: s.writeToAddr,
-		}
-		s.engine.BroadcastEvent(evt)
-		s.Shutdown(nil)
+		s.Shutdown()
 		return
 	}
 
@@ -157,13 +155,19 @@ func (s *streamWriter) init() {
 		return
 	}
 
-	conn := drpcconn.New(rawconn)
+	conn := drpcconn.NewWithOptions(rawconn, drpcconn.Options{
+		Manager: drpcmanager.Options{
+			Reader: drpcwire.ReaderOptions{
+				MaximumBufferSize: s.buffSize,
+			},
+		},
+	})
 	client := NewDRPCRemoteClient(conn)
 
 	stream, err := client.Receive(context.Background())
 	if err != nil {
 		slog.Error("receive", "err", err, "remote", s.writeToAddr)
-		s.Shutdown(nil)
+		s.Shutdown()
 		return
 	}
 
@@ -179,20 +183,21 @@ func (s *streamWriter) init() {
 		slog.Debug("lost connection",
 			"remote", s.writeToAddr,
 		)
-		s.Shutdown(nil)
+		s.Shutdown()
 	}()
 }
 
-func (s *streamWriter) Shutdown(wg *sync.WaitGroup) {
-	s.engine.Send(s.routerPID, terminateStream{address: s.writeToAddr})
+// TODO: is there a way that stream router can listen to event stream
+// instead of sending the event itself?
+func (s *streamWriter) Shutdown() {
+	evt := actor.RemoteUnreachableEvent{ListenAddr: s.writeToAddr}
+	s.engine.Send(s.routerPID, evt)
+	s.engine.BroadcastEvent(evt)
 	if s.stream != nil {
 		s.stream.Close()
 	}
 	s.inbox.Stop()
 	s.engine.Registry.Remove(s.PID())
-	if wg != nil {
-		wg.Done()
-	}
 }
 
 func (s *streamWriter) Start() {

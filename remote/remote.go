@@ -10,13 +10,16 @@ import (
 	"sync/atomic"
 
 	"github.com/anthdm/hollywood/actor"
+	"storj.io/drpc/drpcmanager"
 	"storj.io/drpc/drpcmux"
 	"storj.io/drpc/drpcserver"
+	"storj.io/drpc/drpcwire"
 )
 
 // Config holds the remote configuration.
 type Config struct {
 	TLSConfig *tls.Config
+	BuffSize  int
 	// Wg        *sync.WaitGroup
 }
 
@@ -32,11 +35,18 @@ func (c Config) WithTLS(tlsconf *tls.Config) Config {
 	return c
 }
 
+// Set the buffer size of the stream reader.
+// If not provided, the default buffer size is 4MB
+// defined by drpc package
+func (c Config) WithBufferSize(size int) Config {
+	c.BuffSize = size
+	return c
+}
+
 type Remote struct {
 	addr            string
 	engine          *actor.Engine
 	config          Config
-	streamReader    *streamReader
 	streamRouterPID *actor.PID
 	stopCh          chan struct{} // Stop closes this channel to signal the remote to stop listening.
 	stopWg          *sync.WaitGroup
@@ -57,7 +67,6 @@ func New(addr string, config Config) *Remote {
 		config: config,
 	}
 	r.state.Store(stateInitialized)
-	r.streamReader = newStreamReader(r)
 	return r
 }
 
@@ -81,14 +90,20 @@ func (r *Remote) Start(e *actor.Engine) error {
 	}
 	slog.Debug("listening", "addr", r.addr)
 	mux := drpcmux.New()
-	err = DRPCRegisterRemote(mux, r.streamReader)
+	err = DRPCRegisterRemote(mux, newStreamReader(r))
 	if err != nil {
 		return fmt.Errorf("failed to register remote: %w", err)
 	}
-	s := drpcserver.New(mux)
+	s := drpcserver.NewWithOptions(mux, drpcserver.Options{
+		Manager: drpcmanager.Options{
+			Reader: drpcwire.ReaderOptions{
+				MaximumBufferSize: r.config.BuffSize,
+			},
+		},
+	})
 
 	r.streamRouterPID = r.engine.Spawn(
-		newStreamRouter(r.engine, r.config.TLSConfig),
+		newStreamRouter(r.engine, r.config.TLSConfig, r.config.BuffSize),
 		"router", actor.WithInboxSize(1024*1024))
 	slog.Debug("server started", "listenAddr", r.addr)
 	r.stopWg = &sync.WaitGroup{}

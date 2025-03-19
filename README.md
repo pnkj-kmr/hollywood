@@ -29,6 +29,8 @@ large number of concurrent users and complex interactions.
 
 ## Features
 
+Compiles to WASM! Both GOOS=js and GOOS=wasm32
+
 - Guaranteed message delivery on actor failure (buffer mechanism)
 - Fire & forget or request & response messaging, or both
 - High performance dRPC as the transport layer
@@ -104,7 +106,9 @@ Simple enough. The `newHelloer` function returns a new actor. The actor is a str
 Lets look at the `Receive` method.
 
 ```go
-type message struct {}
+type message struct {
+	data string
+}
 
 func (h *helloer) Receive(ctx *actor.Context) {
 	switch msg := ctx.Message().(type) {
@@ -135,7 +139,7 @@ Local messages can be of any type.
 Finally, lets send a message to the actor.
 
 ```go
-engine.Send(pid, "hello world!")
+engine.Send(pid, &message{data: "hello, world!"})
 ```
 
 This will send a message to the actor. Hollywood will route the message to the correct actor. The actor will then print
